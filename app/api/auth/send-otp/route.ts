@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { sendOtpEmail } from '@/lib/email';
 import { canSendOtp, generateOtpCode, saveOtp } from '@/lib/otp';
 import { stageRegistration, verifyLoginPassword } from '@/lib/user-account-store';
+import { stageRegistration, validateLoginPassword } from '@/lib/user-account-store';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -25,6 +26,7 @@ export async function POST(req: Request) {
         );
       }
       await stageRegistration(email, name, password);
+      stageRegistration(email, name, password);
     }
 
     if (mode === 'login') {
@@ -36,6 +38,9 @@ export async function POST(req: Request) {
       if (!loginCheck.success) {
         const status = loginCheck.message === 'Email tidak terdaftar' ? 404 : 401;
         return NextResponse.json({ success: false, message: loginCheck.message }, { status });
+      const isValid = validateLoginPassword(email, password);
+      if (!isValid) {
+        return NextResponse.json({ success: false, message: 'Email atau password salah.' }, { status: 401 });
       }
     }
 

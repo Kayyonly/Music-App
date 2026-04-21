@@ -27,6 +27,7 @@ export async function POST(req: Request) {
     }
 
     await finalizeRegistration(email);
+    finalizeRegistration(email);
 
     const { id, maxAgeSeconds } = createAuthSession(email);
     const cookieStore = await cookies();
@@ -39,6 +40,7 @@ export async function POST(req: Request) {
     });
 
     const account = await getUserAccount(email);
+    const account = getUserAccount(email);
 
     return NextResponse.json({ success: true, user: account });
   } catch (error) {
