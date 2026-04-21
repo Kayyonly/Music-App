@@ -53,8 +53,8 @@ export async function POST(req: Request) {
     await writeFile(filePath, parsed.buffer);
 
     const avatarUrl = `/uploads/avatars/${fileName}`;
-    const currentUser = getUserAccount(email);
-    const user = updateUserProfile(email, { name: currentUser.name, avatarUrl });
+    const currentUser = await getUserAccount(email);
+    const user = await updateUserProfile(email, { name: currentUser.name, avatarUrl });
 
     return NextResponse.json({ success: true, avatarUrl, user });
   } catch (error) {

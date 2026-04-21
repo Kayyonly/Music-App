@@ -1,13 +1,15 @@
-import { createHash } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
-import path from 'path';
+import { randomBytes, scryptSync, timingSafeEqual } from 'crypto';
 
 export type UserAccount = {
   email: string;
   name: string;
-  passwordHash: string;
   avatarUrl: string;
   updatedAt: number;
+};
+
+type StoredUserAccount = UserAccount & {
+  passwordHash: string;
+  createdAt: number;
 };
 
 type PendingRegistration = {
@@ -18,89 +20,145 @@ type PendingRegistration = {
 };
 
 const DEFAULT_AVATAR = '/default-avatar.png';
-const DATA_DIRECTORY = path.join(process.cwd(), '.data');
-const ACCOUNT_STORE_FILE = path.join(DATA_DIRECTORY, 'accounts.json');
 
-const accountTable = new Map<string, UserAccount>();
-const pendingRegistrationTable = new Map<string, PendingRegistration>();
+function normalizeEmail(email: string) {
+  return email.toLowerCase().trim();
+}
 
-function ensureDataDir() {
-  if (!existsSync(DATA_DIRECTORY)) {
-    mkdirSync(DATA_DIRECTORY, { recursive: true });
+function getRedisConfig() {
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (!url || !token) {
+    throw new Error('UPSTASH_REDIS_REST_URL dan UPSTASH_REDIS_REST_TOKEN wajib diisi untuk auth store.');
   }
+
+  return { url, token };
 }
 
-function saveAccounts() {
-  ensureDataDir();
-  const serialized = JSON.stringify(Object.fromEntries(accountTable), null, 2);
-  writeFileSync(ACCOUNT_STORE_FILE, serialized, 'utf8');
-}
+async function redisCommand<T = unknown>(...command: Array<string | number>) {
+  const config = getRedisConfig();
 
-function loadAccounts() {
-  if (!existsSync(ACCOUNT_STORE_FILE)) return;
+  const response = await fetch(`${config.url}/pipeline`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify([command]),
+    cache: 'no-store',
+  });
 
-  try {
-    const raw = readFileSync(ACCOUNT_STORE_FILE, 'utf8');
-    const parsed = JSON.parse(raw) as Record<string, UserAccount>;
-
-    for (const [email, account] of Object.entries(parsed)) {
-      accountTable.set(email, {
-        email: account.email,
-        name: account.name,
-        passwordHash: account.passwordHash,
-        avatarUrl: account.avatarUrl || DEFAULT_AVATAR,
-        updatedAt: account.updatedAt || Date.now(),
-      });
-    }
-  } catch (error) {
-    console.error('[ACCOUNT_STORE_LOAD_ERROR]', error);
+  if (!response.ok) {
+    const reason = await response.text();
+    throw new Error(`Redis command failed: ${response.status} ${reason}`);
   }
+
+  const payload = (await response.json()) as Array<{ result: T }>;
+  return payload[0]?.result ?? null;
 }
 
-loadAccounts();
+function userKey(email: string) {
+  return `user:${normalizeEmail(email)}`;
+}
+
+function pendingRegistrationKey(email: string) {
+  return `pending-registration:${normalizeEmail(email)}`;
+}
 
 function hashPassword(rawPassword: string) {
-  return createHash('sha256').update(`${process.env.AUTH_PASSWORD_SALT ?? 'vynra'}:${rawPassword}`).digest('hex');
+  const salt = randomBytes(16).toString('hex');
+  const hash = scryptSync(rawPassword, salt, 64).toString('hex');
+  return `scrypt:${salt}:${hash}`;
 }
 
-export function stageRegistration(email: string, name: string, password: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  pendingRegistrationTable.set(normalizedEmail, {
+function verifyPassword(rawPassword: string, storedPasswordHash: string) {
+  const [scheme, salt, hash] = storedPasswordHash.split(':');
+  if (scheme !== 'scrypt' || !salt || !hash) return false;
+
+  const computed = scryptSync(rawPassword, salt, 64).toString('hex');
+  return timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(computed, 'hex'));
+}
+
+async function getUserWithPassword(email: string): Promise<StoredUserAccount | null> {
+  const raw = await redisCommand<string | null>('GET', userKey(email));
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw) as StoredUserAccount;
+  } catch {
+    return null;
+  }
+}
+
+async function saveUser(user: StoredUserAccount) {
+  await redisCommand('SET', userKey(user.email), JSON.stringify(user));
+}
+
+export async function stageRegistration(email: string, name: string, password: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const now = Date.now();
+
+  const pending: PendingRegistration = {
     email: normalizedEmail,
     name: name.trim(),
     passwordHash: hashPassword(password),
-    createdAt: Date.now(),
-  });
+    createdAt: now,
+  };
+
+  await redisCommand('SET', pendingRegistrationKey(normalizedEmail), JSON.stringify(pending), 'EX', 60 * 60);
 }
 
-export function finalizeRegistration(email: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  const pending = pendingRegistrationTable.get(normalizedEmail);
+export async function finalizeRegistration(email: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const rawPending = await redisCommand<string | null>('GET', pendingRegistrationKey(normalizedEmail));
 
-  if (!pending) return;
+  if (!rawPending) return;
 
-  accountTable.set(normalizedEmail, {
+  const pending = JSON.parse(rawPending) as PendingRegistration;
+  const existing = await getUserWithPassword(normalizedEmail);
+
+  const user: StoredUserAccount = {
     email: normalizedEmail,
     name: pending.name,
     passwordHash: pending.passwordHash,
-    avatarUrl: accountTable.get(normalizedEmail)?.avatarUrl ?? DEFAULT_AVATAR,
+    avatarUrl: existing?.avatarUrl ?? DEFAULT_AVATAR,
+    createdAt: existing?.createdAt ?? pending.createdAt,
     updatedAt: Date.now(),
-  });
-  saveAccounts();
-  pendingRegistrationTable.delete(normalizedEmail);
+  };
+
+  await saveUser(user);
+  await redisCommand('DEL', pendingRegistrationKey(normalizedEmail));
 }
 
-export function validateLoginPassword(email: string, password: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  const account = accountTable.get(normalizedEmail);
+export async function verifyLoginPassword(email: string, password: string) {
+  const normalizedEmail = normalizeEmail(email);
+  console.log('LOGIN EMAIL:', normalizedEmail);
 
-  if (!account) return false;
-  return account.passwordHash === hashPassword(password);
+  const user = await getUserWithPassword(normalizedEmail);
+  console.log('USER FOUND:', user ? { email: user.email, name: user.name } : null);
+
+  if (!user) {
+    return { success: false as const, message: 'Email tidak terdaftar' };
+  }
+
+  const isValid = verifyPassword(password, user.passwordHash);
+  if (!isValid) {
+    return { success: false as const, message: 'Password salah' };
+  }
+
+  return { success: true as const, user };
 }
 
-export function getUserAccount(email: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  const account = accountTable.get(normalizedEmail);
+
+export async function validateLoginPassword(email: string, password: string) {
+  const result = await verifyLoginPassword(email, password);
+  return result.success;
+}
+
+export async function getUserAccount(email: string): Promise<UserAccount> {
+  const normalizedEmail = normalizeEmail(email);
+  const account = await getUserWithPassword(normalizedEmail);
 
   if (account) {
     return {
@@ -119,69 +177,63 @@ export function getUserAccount(email: string) {
   };
 }
 
-export function updateUserProfile(email: string, payload: { name: string; avatarUrl?: string }) {
-  const normalizedEmail = email.trim().toLowerCase();
-  const existing = accountTable.get(normalizedEmail);
-  const base = existing ?? {
+export async function updateUserProfile(email: string, payload: { name: string; avatarUrl?: string }) {
+  const normalizedEmail = normalizeEmail(email);
+  const existing = await getUserWithPassword(normalizedEmail);
+
+  const user: StoredUserAccount = {
     email: normalizedEmail,
-    passwordHash: hashPassword(''),
-    name: normalizedEmail.split('@')[0] || 'Vynra User',
-    avatarUrl: DEFAULT_AVATAR,
+    name: payload.name.trim() || existing?.name || normalizedEmail.split('@')[0] || 'Vynra User',
+    avatarUrl: payload.avatarUrl?.trim() || existing?.avatarUrl || DEFAULT_AVATAR,
+    passwordHash: existing?.passwordHash || hashPassword(randomBytes(24).toString('hex')),
+    createdAt: existing?.createdAt ?? Date.now(),
     updatedAt: Date.now(),
   };
 
-  accountTable.set(normalizedEmail, {
-    ...base,
-    name: payload.name.trim() || base.name,
-    avatarUrl: payload.avatarUrl?.trim() || base.avatarUrl || DEFAULT_AVATAR,
-    updatedAt: Date.now(),
-  });
-  saveAccounts();
+  await saveUser(user);
 
-  return getUserAccount(normalizedEmail);
+  return {
+    email: user.email,
+    name: user.name,
+    avatarUrl: user.avatarUrl,
+    updatedAt: user.updatedAt,
+  };
 }
 
-export function changePassword(email: string, oldPassword: string, newPassword: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  const account = accountTable.get(normalizedEmail);
-  if (!account) return { success: false, message: 'Akun tidak ditemukan.' };
+export async function changePassword(email: string, oldPassword: string, newPassword: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const user = await getUserWithPassword(normalizedEmail);
+  if (!user) return { success: false, message: 'Akun tidak ditemukan.' };
 
-  if (account.passwordHash !== hashPassword(oldPassword)) {
+  if (!verifyPassword(oldPassword, user.passwordHash)) {
     return { success: false, message: 'Password lama tidak sesuai.' };
   }
 
-  accountTable.set(normalizedEmail, {
-    ...account,
+  const updated: StoredUserAccount = {
+    ...user,
     passwordHash: hashPassword(newPassword),
     updatedAt: Date.now(),
-  });
-  saveAccounts();
+  };
+
+  await saveUser(updated);
 
   return { success: true, message: 'Password berhasil diperbarui.' };
 }
 
-export function setUserPassword(email: string, newPassword: string) {
-  const normalizedEmail = email.trim().toLowerCase();
-  const existing = accountTable.get(normalizedEmail);
+export async function setUserPassword(email: string, newPassword: string) {
+  const normalizedEmail = normalizeEmail(email);
+  const existing = await getUserWithPassword(normalizedEmail);
 
-  if (!existing) {
-    accountTable.set(normalizedEmail, {
-      email: normalizedEmail,
-      name: normalizedEmail.split('@')[0] || 'Vynra User',
-      passwordHash: hashPassword(newPassword),
-      avatarUrl: DEFAULT_AVATAR,
-      updatedAt: Date.now(),
-    });
-    saveAccounts();
-    return;
-  }
-
-  accountTable.set(normalizedEmail, {
-    ...existing,
+  const updated: StoredUserAccount = {
+    email: normalizedEmail,
+    name: existing?.name || normalizedEmail.split('@')[0] || 'Vynra User',
+    avatarUrl: existing?.avatarUrl || DEFAULT_AVATAR,
     passwordHash: hashPassword(newPassword),
+    createdAt: existing?.createdAt ?? Date.now(),
     updatedAt: Date.now(),
-  });
-  saveAccounts();
+  };
+
+  await saveUser(updated);
 }
 
-export { DEFAULT_AVATAR };
+export { DEFAULT_AVATAR, normalizeEmail };
