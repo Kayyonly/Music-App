@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { sendOtpEmail } from '@/lib/email';
-import { generateOtpCode, saveOtp } from '@/lib/otp';
-import { stageRegistration, validateLoginPassword } from '@/lib/user-account-store';
+import { canSendOtp, generateOtpCode, saveOtp } from '@/lib/otp';
+import { stageRegistration, verifyLoginPassword } from '@/lib/user-account-store';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -24,7 +24,7 @@ export async function POST(req: Request) {
           { status: 400 },
         );
       }
-      stageRegistration(email, name, password);
+      await stageRegistration(email, name, password);
     }
 
     if (mode === 'login') {
@@ -32,14 +32,32 @@ export async function POST(req: Request) {
         return NextResponse.json({ success: false, message: 'Password wajib diisi.' }, { status: 400 });
       }
 
-      const isValid = validateLoginPassword(email, password);
-      if (!isValid) {
-        return NextResponse.json({ success: false, message: 'Email atau password salah.' }, { status: 401 });
+      const loginCheck = await verifyLoginPassword(email, password);
+      if (!loginCheck.success) {
+        const status = loginCheck.message === 'Email tidak terdaftar' ? 404 : 401;
+        return NextResponse.json({ success: false, message: loginCheck.message }, { status });
       }
     }
 
+    const rateLimit = await canSendOtp(email);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: 'Terlalu cepat meminta OTP. Coba lagi.',
+          retryAfterMs: rateLimit.retryAfterMs,
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(Math.ceil(rateLimit.retryAfterMs / 1000)),
+          },
+        },
+      );
+    }
+
     const otp = generateOtpCode();
-    const otpRecord = saveOtp(email, otp);
+    const otpRecord = await saveOtp(email, otp);
     const emailResult = await sendOtpEmail({ email, code: otp });
 
     if (!emailResult.success) {
