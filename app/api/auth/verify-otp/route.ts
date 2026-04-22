@@ -1,4 +1,5 @@
 import { cookies as getCookies } from 'next/headers';
+import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { AUTH_COOKIE_NAME } from '@/lib/auth-constants';
 import { createAuthSession } from '@/lib/auth-session';
@@ -30,6 +31,10 @@ export async function POST(req: Request) {
 
     const { id, maxAgeSeconds } = createAuthSession(email);
     const cookieStore = await getCookies();
+    finalizeRegistration(email);
+
+    const { id, maxAgeSeconds } = createAuthSession(email);
+    const cookieStore = await cookies();
     cookieStore.set(AUTH_COOKIE_NAME, id, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -39,6 +44,7 @@ export async function POST(req: Request) {
     });
 
     const account = await getUserAccount(email);
+    const account = getUserAccount(email);
 
     return NextResponse.json({ success: true, user: account });
   } catch (error) {

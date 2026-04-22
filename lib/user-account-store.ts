@@ -3,6 +3,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'crypto';
 export type UserAccount = {
   email: string;
   name: string;
+  passwordHash: string;
   avatarUrl: string;
   updatedAt: number;
 };
@@ -150,7 +151,6 @@ export async function verifyLoginPassword(email: string, password: string) {
   return { success: true as const, user };
 }
 
-
 export async function validateLoginPassword(email: string, password: string) {
   const result = await verifyLoginPassword(email, password);
   return result.success;
@@ -164,6 +164,7 @@ export async function getUserAccount(email: string): Promise<UserAccount> {
     return {
       email: account.email,
       name: account.name,
+      passwordHash: account.passwordHash,
       avatarUrl: account.avatarUrl || DEFAULT_AVATAR,
       updatedAt: account.updatedAt,
     };
@@ -172,6 +173,7 @@ export async function getUserAccount(email: string): Promise<UserAccount> {
   return {
     email: normalizedEmail,
     name: normalizedEmail.split('@')[0] || 'Vynra User',
+    passwordHash: '',
     avatarUrl: DEFAULT_AVATAR,
     updatedAt: Date.now(),
   };
