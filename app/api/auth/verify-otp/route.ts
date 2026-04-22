@@ -1,12 +1,11 @@
-import { cookies } from 'next/headers';
+import { cookies as getCookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { AUTH_COOKIE_NAME } from '@/lib/auth-constants';
 import { createAuthSession } from '@/lib/auth-session';
-import { findOtpByEmail, incrementOtpAttempts, removeOtp } from '@/lib/otp';
+import { verifyOtp } from '@/lib/otp';
 import { finalizeRegistration, getUserAccount } from '@/lib/user-account-store';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MAX_VERIFY_ATTEMPTS = 5;
 
 export async function POST(req: Request) {
   try {
@@ -19,42 +18,18 @@ export async function POST(req: Request) {
     }
 
     if (!/^\d{6}$/.test(inputOtp)) {
-      return NextResponse.json({ success: false, message: 'Kode salah' }, { status: 400 });
+      return NextResponse.json({ success: false, message: 'OTP salah' }, { status: 400 });
     }
 
-    const otpRecord = findOtpByEmail(email);
-
-    if (!otpRecord) {
-      return NextResponse.json({ success: false, message: 'OTP tidak ditemukan' }, { status: 404 });
+    const verification = await verifyOtp(email, inputOtp);
+    if (!verification.success) {
+      return NextResponse.json({ success: false, message: verification.message }, { status: verification.status });
     }
 
-    const now = Date.now();
-    const { otp: storedOtp, expiresAt } = otpRecord;
-
-    if (now > expiresAt) {
-      removeOtp(email);
-      return NextResponse.json({ success: false, message: 'Kode sudah expired' }, { status: 400 });
-    }
-
-    if (inputOtp.trim() !== storedOtp) {
-      const updated = incrementOtpAttempts(email);
-
-      if (updated && updated.failedAttempts >= MAX_VERIFY_ATTEMPTS) {
-        removeOtp(email);
-        return NextResponse.json(
-          { success: false, message: 'Terlalu banyak percobaan. Silakan minta OTP baru.' },
-          { status: 429 },
-        );
-      }
-
-      return NextResponse.json({ success: false, message: 'Kode salah' }, { status: 400 });
-    }
-
-    removeOtp(email);
-    finalizeRegistration(email);
+    await finalizeRegistration(email);
 
     const { id, maxAgeSeconds } = createAuthSession(email);
-    const cookieStore = await cookies();
+    const cookieStore = await getCookies();
     cookieStore.set(AUTH_COOKIE_NAME, id, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -63,7 +38,7 @@ export async function POST(req: Request) {
       maxAge: maxAgeSeconds,
     });
 
-    const account = getUserAccount(email);
+    const account = await getUserAccount(email);
 
     return NextResponse.json({ success: true, user: account });
   } catch (error) {

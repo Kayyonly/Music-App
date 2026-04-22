@@ -26,7 +26,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ success: false, message: 'Konfirmasi password tidak sama.' }, { status: 400 });
   }
 
-  const result = changePassword(email, oldPassword, newPassword);
+  const result = await changePassword(email, oldPassword, newPassword);
   if (!result.success) {
     return NextResponse.json(result, { status: 400 });
   }

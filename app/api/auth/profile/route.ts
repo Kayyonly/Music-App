@@ -17,6 +17,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ success: false, message: 'Nama wajib diisi.' }, { status: 400 });
   }
 
-  const user = updateUserProfile(email, { name, avatarUrl: avatarUrl || undefined });
+  const user = await updateUserProfile(email, { name, avatarUrl: avatarUrl || undefined });
   return NextResponse.json({ success: true, user });
 }

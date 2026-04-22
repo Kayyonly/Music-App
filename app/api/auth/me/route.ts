@@ -9,6 +9,6 @@ export async function GET() {
     return NextResponse.json({ success: false, message: 'Unauthorized' }, { status: 401 });
   }
 
-  const user = getUserAccount(email);
+  const user = await getUserAccount(email);
   return NextResponse.json({ success: true, user });
 }
